@@ -1,0 +1,33 @@
+INFO:     Started server process [498]
+INFO:     Waiting for application startup.
+2026-11-16 17:29:51,884 INFO main: starting role=backup zone=internal.local db=/workspace/data/backup-auto.db dns_udp=15055 api=18003
+2026-11-16 17:29:51,885 INFO dns: UDP DNS listener on 127.0.0.1:15055 (zone=internal.local, role=backup)
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:18003 (Press CTRL+C to quit)
+2026-11-16 17:29:51,980 INFO httpx: HTTP Request: GET http://127.0.0.1:18002/api/zone "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:46446 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46460 - "GET /api/version HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46464 - "GET /api/version HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46472 - "GET /api/version HTTP/1.1" 200 OK
+2026-11-16 17:29:53,017 INFO httpx: HTTP Request: GET http://127.0.0.1:18002/api/zone "HTTP/1.1 200 OK"
+2026-11-16 17:29:53,070 INFO sync: applied serial=1 from primary
+INFO:     127.0.0.1:46478 - "GET /api/version HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46494 - "GET /api/version HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46498 - "GET /api/version HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46512 - "GET /api/version HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46522 - "GET /api/version HTTP/1.1" 200 OK
+2026-11-16 17:29:54,122 INFO httpx: HTTP Request: GET http://127.0.0.1:18002/api/zone "HTTP/1.1 200 OK"
+2026-11-16 17:29:54,663 INFO sync: applied serial=2 from primary
+INFO:     127.0.0.1:46530 - "GET /api/version HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46546 - "GET /api/version HTTP/1.1" 200 OK
+2026-11-16 17:29:54,774 INFO httpx: HTTP Request: GET http://127.0.0.1:18002/api/zone "HTTP/1.1 200 OK"
+2026-11-16 17:29:55,090 INFO sync: ignored stale transfer upstream=2 local=2
+INFO:     127.0.0.1:46560 - "POST /api/sync HTTP/1.1" 200 OK
+2026-11-16 17:29:55,152 INFO httpx: HTTP Request: GET http://127.0.0.1:18002/api/zone "HTTP/1.1 200 OK"
+2026-11-16 17:29:55,157 INFO sync: ignored stale transfer upstream=2 local=2
+INFO:     127.0.0.1:46574 - "POST /api/sync HTTP/1.1" 200 OK
+2026-11-16 17:29:55,706 WARNING sync: sync transfer failed, keeping serial=2: ConnectError: All connection attempts failed
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [498]

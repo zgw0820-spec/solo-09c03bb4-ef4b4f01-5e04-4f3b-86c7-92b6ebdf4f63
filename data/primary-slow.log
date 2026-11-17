@@ -1,0 +1,14 @@
+INFO:     Started server process [507]
+INFO:     Waiting for application startup.
+2026-11-16 17:29:56,772 INFO main: starting role=primary zone=internal.local db=/workspace/data/primary-slow.db dns_udp=15058 api=18010
+2026-11-16 17:29:56,772 INFO dns: UDP DNS listener on 127.0.0.1:15058 (zone=internal.local, role=primary)
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:18010 (Press CTRL+C to quit)
+INFO:     127.0.0.1:57218 - "GET /health HTTP/1.1" 200 OK
+2026-11-16 17:29:57,103 INFO main: published new version serial=1 records=1
+INFO:     127.0.0.1:57226 - "POST /api/zone HTTP/1.1" 201 Created
+INFO:     127.0.0.1:57236 - "GET /api/zone HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [507]

@@ -1,0 +1,50 @@
+services:
+  primary:
+    build: .
+    image: intranet-dns:latest
+    environment:
+      DNS_ROLE: primary
+      DNS_ZONE: internal.local
+      DB_PATH: /data/primary.db
+      DNS_PORT: "5053"
+      API_PORT: "8000"
+    ports:
+      - "8080:8000"      # primary Swagger / REST
+      - "5053:5053/udp"  # primary DNS
+    volumes:
+      - primary-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backup:
+    build: .
+    image: intranet-dns:latest
+    depends_on:
+      primary:
+        condition: service_healthy
+    environment:
+      DNS_ROLE: backup
+      DNS_ZONE: internal.local
+      DB_PATH: /data/backup.db
+      DNS_PORT: "5053"
+      API_PORT: "8000"
+      PRIMARY_API_URL: http://primary:8000
+      SYNC_INTERVAL: "3"
+      HTTP_TIMEOUT: "10"
+    ports:
+      - "8081:8000"      # backup Swagger / REST
+      - "5054:5053/udp"  # backup DNS
+    volumes:
+      - backup-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  primary-data:
+  backup-data:
