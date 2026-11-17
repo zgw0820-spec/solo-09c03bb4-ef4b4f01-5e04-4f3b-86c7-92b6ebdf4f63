@@ -1,16 +1,22 @@
 """Authoritative UDP DNS service for the fixed intranet zone.
 
 Every answer is built from one immutable version snapshot fetched in a
-single storage read, so a reply can never mix records of two versions.
-While a transfer is in progress the old version stays active and keeps
-being answered.
+single storage read, so a reply can never mix records (or delegations) of
+two versions. While a transfer is in progress the old version stays
+active and keeps being answered.
+
+The zone may carry one delegation for a child zone. Queries at or below
+the child are answered with a non-authoritative referral built from that
+same snapshot: NS records in the authority section and the in-bailiwick
+nameserver's IPv4 glue in the additional section. No old parent-side A
+data and no NXDOMAIN is used for those names.
 """
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import Dict, List, Optional
 
-from dnslib import A, DNSRecord, RR, QTYPE, RCODE
+from dnslib import A, DNSRecord, NS, RR, QTYPE, RCODE
 from dnslib.server import BaseResolver, DNSServer
 
 from .config import settings
@@ -18,9 +24,15 @@ from .storage import storage
 
 log = logging.getLogger("dns")
 
+_REFERRAL_TTL = 30
+
 
 def _normalise(qname: str) -> str:
     return qname.rstrip(".").lower()
+
+
+def _in_child(qname: str, child: str) -> bool:
+    return qname == child or qname.endswith("." + child)
 
 
 class ZoneResolver(BaseResolver):
@@ -36,14 +48,20 @@ class ZoneResolver(BaseResolver):
             reply.header.rcode = RCODE.REFUSED
             return reply
 
+        # One consistent snapshot -> one records+delegation pair per answer.
+        serial, records, delegation = storage.get_active_zone()
+
+        # A delegated child is not answered authoritatively at all: return
+        # the referral even for A/NS queries at the child apex or below.
+        if delegation is not None and _in_child(qname, delegation["name"]):
+            return self._referral(reply, delegation, serial)
+
         if QTYPE[q.qtype] != "A":
             # In-zone but not an A query: authoritative NOERROR/NODATA.
             reply.header.rcode = RCODE.NOERROR
             return reply
 
-        # One consistent snapshot -> one version per answer.
-        serial, records, _ = storage.get_active_version()
-        name_map = {}
+        name_map: Dict[str, List[str]] = {}
         for rec in records:
             name_map.setdefault(rec["name"], []).append(rec["ip"])
 
@@ -59,16 +77,37 @@ class ZoneResolver(BaseResolver):
                     q.qname,
                     QTYPE.A,
                     rdata=A(ip),
-                    ttl=30,
+                    ttl=_REFERRAL_TTL,
                 )
             )
         log.debug("ANSWER %s -> %s (serial=%s)", qname, ips, serial)
         return reply
 
+    @staticmethod
+    def _referral(reply: DNSRecord, delegation: Dict[str, str],
+                  serial: int) -> DNSRecord:
+        """Non-authoritative referral: NS in authority, glue in additional."""
+        child = delegation["name"]
+        ns = delegation["ns"]
+        glue = delegation["glue"]
+        reply.header.rcode = RCODE.NOERROR
+        reply.header.aa = 0  # referral, not an authoritative answer
+        reply.add_auth(
+            RR(child, QTYPE.NS, rdata=NS(ns), ttl=_REFERRAL_TTL)
+        )
+        reply.add_ar(
+            RR(ns, QTYPE.A, rdata=A(glue), ttl=_REFERRAL_TTL)
+        )
+        log.debug(
+            "REFERRAL %s -> %s glue=%s (serial=%s)",
+            child, ns, glue, serial,
+        )
+        return reply
+
 
 class DnsService:
     def __init__(self) -> None:
-        self._server: DNSServer | None = None
+        self._server: Optional[DNSServer] = None
 
     def start(self) -> None:
         resolver = ZoneResolver()

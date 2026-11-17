@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from .config import settings
 from .dns_server import dns_service
 from .models import (
+    DelegationOut,
     PublishResult,
     RecordOut,
     VersionOut,
@@ -25,23 +26,29 @@ log = logging.getLogger("main")
 
 
 def _zone_out() -> ZoneOut:
-    serial, records, published_at = storage.get_active_version()
+    serial, records, delegation, published_at = storage.get_active_snapshot()
     return ZoneOut(
         zone=settings.dns_zone,
         serial=serial,
         records=[RecordOut(**r) for r in records],
+        delegation=(
+            DelegationOut(**delegation) if delegation is not None else None
+        ),
         published_at=published_at,
     )
 
 
 def _version_out() -> VersionOut:
-    serial, records, published_at = storage.get_active_version()
+    serial, records, delegation, published_at = storage.get_active_snapshot()
     sync_state = storage.get_sync_state()
     return VersionOut(
         role=settings.role,
         zone=settings.dns_zone,
         serial=serial,
         record_count=len(records),
+        delegation_name=(
+            delegation["name"] if delegation is not None else None
+        ),
         published_at=published_at,
         last_sync_at=sync_state["last_sync_at"],
         last_sync_status=sync_state["last_sync_status"],
@@ -77,11 +84,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Primary/Backup DNS for fixed intranet zone",
-    version="1.0.0",
+    version="1.1.0",
     description=(
-        "Primary accepts a complete zone (up to 8 A records); the backup "
-        "pulls whole versions over HTTP and answers A queries over UDP. "
-        "Every answer uses one immutable version."
+        "Primary accepts a complete zone (up to 8 A records) plus an "
+        "optional child-zone delegation (NS name + IPv4 glue); the backup "
+        "pulls whole versions over HTTP and answers A queries and "
+        "referrals over UDP. Every answer uses one immutable version."
     ),
     lifespan=lifespan,
 )
@@ -110,20 +118,35 @@ def get_zone() -> ZoneOut:
     tags=["primary"],
 )
 def publish_zone(payload: ZonePayload) -> PublishResult:
-    """Replace the whole zone. The serial increments only on success."""
+    """Replace the whole zone, including its optional delegation.
+
+    The serial increments only on success. Validation (including the
+    parent/delegation conflict rules) happens before this handler, so a
+    rejected submission leaves both serial and active zone untouched.
+    """
     if not settings.is_primary:
         raise HTTPException(
             status_code=403,
             detail="zone publishing is only allowed on the primary",
         )
     records = [r.model_dump() for r in payload.sorted_records()]
-    serial, published_at = storage.next_publish(records)
-    log.info("published new version serial=%s records=%s",
-             serial, len(records))
+    delegation = payload.delegation_dict()
+    serial, published_at = storage.next_publish(records, delegation)
+    log.info(
+        "published new version serial=%s records=%s delegation=%s",
+        serial,
+        len(records),
+        delegation["name"] if delegation else None,
+    )
     return PublishResult(
         ok=True,
         serial=serial,
         record_count=len(records),
+        delegation=(
+            DelegationOut(**delegation)
+            if delegation is not None
+            else None
+        ),
         published_at=published_at,
     )
 

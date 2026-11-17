@@ -1,11 +1,12 @@
 """SQLite persistence.
 
 Each role has its own database file. A publish/sync is committed as one
-transaction: the new immutable version row and the pointer to the active
-serial move together, so an answer can never be assembled from two
-versions. A stale transfer (serial <= active serial) is rejected, which
-guarantees a late/old transfer can never roll back an already active
-version.
+transaction: the new immutable version row (A records and optional child
+delegation together) and the pointer to the active serial move together,
+so an answer can never be assembled from two versions or from a mix of
+one version's records and another version's delegation. A stale transfer
+(serial <= active serial) is rejected, which guarantees a late/old
+transfer can never roll back an already active version.
 """
 from __future__ import annotations
 
@@ -51,10 +52,11 @@ class Storage:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS zone_versions (
-                    serial       INTEGER PRIMARY KEY,
-                    records_json TEXT    NOT NULL,
-                    record_count INTEGER NOT NULL,
-                    published_at TEXT    NOT NULL
+                    serial          INTEGER PRIMARY KEY,
+                    records_json    TEXT    NOT NULL,
+                    record_count    INTEGER NOT NULL,
+                    published_at    TEXT    NOT NULL,
+                    delegation_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS state (
                     key   TEXT PRIMARY KEY,
@@ -62,6 +64,18 @@ class Storage:
                 );
                 """
             )
+            # Databases created before delegation support: the column is
+            # additive and old rows simply carry no delegation (NULL).
+            columns = {
+                row["name"]
+                for row in conn.execute(
+                    "PRAGMA table_info(zone_versions)"
+                ).fetchall()
+            }
+            if "delegation_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE zone_versions ADD COLUMN delegation_json TEXT"
+                )
             row = conn.execute(
                 "SELECT value FROM state WHERE key='active_serial'"
             ).fetchone()
@@ -92,25 +106,54 @@ class Storage:
         ).fetchone()
         return None if row is None else row["value"]
 
-    def get_active_version(
+    def get_active_snapshot(
         self,
-    ) -> Tuple[int, List[Dict[str, str]], Optional[str]]:
-        """Return (serial, records, published_at) of one active version."""
+    ) -> Tuple[int, List[Dict[str, str]], Optional[Dict[str, str]],
+               Optional[str]]:
+        """Return (serial, records, delegation, published_at) of one version.
+
+        All four values come from a single row read, so a caller can never
+        observe the records of one version together with the delegation of
+        another.
+        """
         conn = self._connect()
         try:
             serial = int(self._get_state(conn, "active_serial") or "0")
             row = conn.execute(
-                "SELECT records_json, published_at FROM zone_versions "
-                "WHERE serial=?",
+                "SELECT records_json, delegation_json, published_at "
+                "FROM zone_versions WHERE serial=?",
                 (serial,),
             ).fetchone()
             records = json.loads(row["records_json"]) if row else []
-            return serial, records, (row["published_at"] if row else None)
+            delegation = (
+                json.loads(row["delegation_json"])
+                if row and row["delegation_json"]
+                else None
+            )
+            return (
+                serial,
+                records,
+                delegation,
+                (row["published_at"] if row else None),
+            )
         finally:
             conn.close()
 
+    def get_active_version(
+        self,
+    ) -> Tuple[int, List[Dict[str, str]], Optional[str]]:
+        """Return (serial, records, published_at) of one active version."""
+        serial, records, _, published_at = self.get_active_snapshot()
+        return serial, records, published_at
+
+    def get_active_zone(self) -> Tuple[int, List[Dict[str, str]],
+                                        Optional[Dict[str, str]]]:
+        """Return the DNS-relevant slice of one active version."""
+        serial, records, delegation, _ = self.get_active_snapshot()
+        return serial, records, delegation
+
     def active_serial(self) -> int:
-        serial, _, _ = self.get_active_version()
+        serial, _, _, _ = self.get_active_snapshot()
         return serial
 
     def get_sync_state(self) -> Dict[str, Any]:
@@ -149,6 +192,7 @@ class Storage:
         serial: int,
         records: List[Dict[str, str]],
         published_at: str,
+        delegation: Optional[Dict[str, str]] = None,
     ) -> bool:
         """Atomically store a version and make it the active one.
 
@@ -157,6 +201,13 @@ class Storage:
         if serial < 1:
             raise ValueError("serial must be a positive integer")
         payload = json.dumps(records, separators=(",", ":"), sort_keys=True)
+        delegation_payload = (
+            json.dumps(
+                delegation, separators=(",", ":"), sort_keys=True
+            )
+            if delegation is not None
+            else None
+        )
         with self._lock:
             conn = self._connect()
             try:
@@ -170,9 +221,15 @@ class Storage:
                     return False
                 conn.execute(
                     "INSERT OR REPLACE INTO zone_versions "
-                    "(serial, records_json, record_count, published_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (serial, payload, len(records), published_at),
+                    "(serial, records_json, record_count, published_at, "
+                    "delegation_json) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        serial,
+                        payload,
+                        len(records),
+                        published_at,
+                        delegation_payload,
+                    ),
                 )
                 conn.execute(
                     "UPDATE state SET value=? WHERE key='active_serial'",
@@ -187,7 +244,9 @@ class Storage:
                 conn.close()
 
     def next_publish(
-        self, records: List[Dict[str, str]]
+        self,
+        records: List[Dict[str, str]],
+        delegation: Optional[Dict[str, str]] = None,
     ) -> Tuple[int, str]:
         """Primary only: increment serial only after a valid publish."""
         with self._lock:
@@ -200,8 +259,8 @@ class Storage:
                 published_at = utcnow_iso()
                 conn.execute(
                     "INSERT INTO zone_versions "
-                    "(serial, records_json, record_count, published_at) "
-                    "VALUES (?, ?, ?, ?)",
+                    "(serial, records_json, record_count, published_at, "
+                    "delegation_json) VALUES (?, ?, ?, ?, ?)",
                     (
                         next_serial,
                         json.dumps(
@@ -209,6 +268,15 @@ class Storage:
                         ),
                         len(records),
                         published_at,
+                        (
+                            json.dumps(
+                                delegation,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            )
+                            if delegation is not None
+                            else None
+                        ),
                     ),
                 )
                 conn.execute(

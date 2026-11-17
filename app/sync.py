@@ -5,6 +5,8 @@ applies it atomically. Properties implemented here:
 
 * a transfer that fails (HTTP error, timeout, broken connection, invalid
   payload) never touches the active version — the old one keeps serving;
+* the delegation (if any) is part of the same payload and the same commit
+  as the A records, so a transfer can switch both together or neither;
 * a stale transfer whose serial is not newer than the active version is
   rejected, so a late/old transfer can never roll back the zone;
 * a background loop plus a startup pull re-sync automatically after a
@@ -18,8 +20,10 @@ import logging
 from typing import Any, Dict, Optional
 
 import httpx
+from pydantic import ValidationError
 
 from .config import settings
+from .models import ZonePayload
 from .storage import storage
 
 log = logging.getLogger("sync")
@@ -50,6 +54,57 @@ class SyncOutcome:
         }
 
 
+def _parse_zone(payload: Any) -> tuple[
+    Optional[Dict[str, Any]], Optional[str]
+]:
+    """Validate a complete zone payload with the shared publish rules.
+
+    Returns (validated, error). The backup applies exactly the same
+    structural rules as the primary (names inside the zone, unique A
+    owners, delegation inside the zone with an in-bailiwick nameserver and
+    no parent A data under the delegation). A malformed or conflicting
+    payload is refused as a whole — it is never partially applied, so the
+    old records *and* the old delegation boundary keep serving together.
+    """
+    if not isinstance(payload, dict):
+        return None, "malformed zone payload from primary"
+    try:
+        upstream_serial = int(payload.get("serial", -1))
+    except (TypeError, ValueError):
+        return None, "malformed serial in zone payload"
+    published_at = payload.get("published_at")
+    if upstream_serial < 1:
+        return None, "malformed serial in zone payload"
+    if not isinstance(published_at, str):
+        return None, "malformed published_at in zone payload"
+    upstream_zone = payload.get("zone")
+    if upstream_zone is not None and (
+        not isinstance(upstream_zone, str)
+        or upstream_zone.rstrip(".").lower()
+        != settings.dns_zone.rstrip(".").lower()
+    ):
+        return None, (
+            f"zone payload for {upstream_zone!r} does not match "
+            f"configured zone {settings.dns_zone!r}"
+        )
+    try:
+        zone = ZonePayload.model_validate(
+            {
+                "records": payload.get("records"),
+                "delegation": payload.get("delegation"),
+            }
+        )
+    except ValidationError as exc:
+        detail = exc.errors()[0].get("msg", "invalid")
+        return None, f"invalid zone payload from primary: {detail}"
+    return {
+        "serial": upstream_serial,
+        "records": [r.model_dump() for r in zone.sorted_records()],
+        "delegation": zone.delegation_dict(),
+        "published_at": published_at,
+    }, None
+
+
 async def sync_once(client: Optional[httpx.AsyncClient] = None) -> SyncOutcome:
     """One pull-and-apply cycle. Never raises: failures keep the old zone."""
     local_serial = storage.active_serial()
@@ -70,25 +125,16 @@ async def sync_once(client: Optional[httpx.AsyncClient] = None) -> SyncOutcome:
                         local_serial, err)
             return SyncOutcome("failed", False, local_serial, None, err)
 
-        upstream_serial = int(payload.get("serial", -1))
-        records = payload.get("records")
-        published_at = payload.get("published_at")
-        if (
-            upstream_serial < 1
-            or not isinstance(records, list)
-            or not isinstance(published_at, str)
-            or any(
-                not isinstance(r, dict)
-                or not isinstance(r.get("name"), str)
-                or not isinstance(r.get("ip"), str)
-                for r in records
+        validated, error = _parse_zone(payload)
+        if validated is None:
+            storage.update_sync_state("failed", error, None)
+            log.warning(
+                "rejected zone payload, keeping serial=%s: %s",
+                local_serial, error,
             )
-        ):
-            err = "malformed zone payload from primary"
-            storage.update_sync_state("failed", err, upstream_serial)
-            return SyncOutcome(
-                "failed", False, local_serial, upstream_serial, err
-            )
+            return SyncOutcome("failed", False, local_serial, None, error)
+        upstream_serial = validated["serial"]
+        local_serial = storage.active_serial()
 
         if upstream_serial <= local_serial:
             # Late/old transfer: must never roll back an active version.
@@ -103,11 +149,15 @@ async def sync_once(client: Optional[httpx.AsyncClient] = None) -> SyncOutcome:
                 "ignored_stale", False, local_serial, upstream_serial
             )
 
-        # Apply the complete new version in one atomic transaction.
+        # Apply the complete new version in one atomic transaction: the
+        # records and the delegation are written together and become
+        # active at the same instant, so a reply can never show the new
+        # records with the old delegation (or vice versa).
         applied = storage.commit_version(
             upstream_serial,
-            [{"name": r["name"], "ip": r["ip"]} for r in records],
-            published_at,
+            validated["records"],
+            validated["published_at"],
+            validated["delegation"],
         )
         if applied:
             storage.update_sync_state("synced", None, upstream_serial)
